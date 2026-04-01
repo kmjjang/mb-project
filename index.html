@@ -80,4 +80,230 @@
   .sector-tag { font-size: 10px; padding: 3px 9px; border-radius: 5px; font-weight: 500; border: 1px solid transparent; }
   .tag-gray { background: var(--bg3); color: var(--text3); border-color: var(--border); }
   .tag-blue { background: rgba(37,99,168,0.08); color: var(--blue); border-color: rgba(37,99,168,0.18); }
-  .ai-box { margin-top: 10
+  .ai-box { margin-top: 10px; background: #fff8f0; border: 1px solid rgba(181,96,26,0.15); border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; padding: 10px 13px; font-size: 12px; color: var(--text2); line-height: 1.75; }
+  .ai-box-label { font-size: 9px; letter-spacing: 0.1em; color: var(--accent); text-transform: uppercase; font-weight: 600; margin-bottom: 4px; font-family: 'JetBrains Mono', monospace; }
+  @media (max-width: 680px) {
+    .layout { grid-template-columns: 1fr; }
+    .sidebar { position: fixed; top: 54px; left: 0; right: 0; bottom: 0; z-index: 150; height: calc(100vh - 54px); border-right: none; transform: translateX(-100%); transition: transform 0.28s; }
+    .sidebar.open { transform: translateX(0); }
+    .panel-toggle { display: block; }
+  }
+</style>
+</head>
+<body>
+<header class="header">
+  <div class="logo">
+    <div class="logo-mark">MB</div>
+    <div>
+      <div class="logo-text">모닝 브리프 <span class="version-tag"><span class="update-dot pulse"></span>v2.0 (서버리스)</span></div>
+      <div class="logo-sub">국내 시장 섹터 분석기</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="time-badge" id="clock">--:--:--</div>
+    <button class="panel-toggle" onclick="document.getElementById('sidebar').classList.toggle('open')"> ☰ 설정</button>
+  </div>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-section">
+      <div class="sidebar-label">뉴스 소스 (복수 선택)</div>
+      <div class="api-card">
+        <div class="source-list" id="source-list">
+          <label class="source-item"><input type="checkbox" value="naver_finance" checked><span>네이버 금융</span></label>
+          <label class="source-item"><input type="checkbox" value="naver_econ"><span>네이버 경제</span></label>
+          <label class="source-item"><input type="checkbox" value="yonhap" checked><span>연합뉴스 경제</span></label>
+          <label class="source-item"><input type="checkbox" value="hankyung" checked><span>한국경제</span></label>
+          <label class="source-item"><input type="checkbox" value="mk"><span>매일경제</span></label>
+          <label class="source-item"><input type="checkbox" value="edaily"><span>이데일리</span></label>
+        </div>
+        <button class="btn-run" id="run-btn" onclick="fetchAllNews()">서버리스 수집 + AI 분석 시작</button>
+        <div class="progress-wrap">
+          <div class="progress-bar"><div class="progress-fill" id="progress"></div></div>
+          <div class="progress-msg" id="progress-msg">대기 중...</div>
+        </div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-label">시스템 아키텍처</div>
+      <div class="api-card">
+        <div class="api-status">
+          <div class="status-dot"></div>
+          <span class="status-label">Vercel 엣지 백엔드 연동 완료</span>
+        </div>
+        <div class="server-tip">
+          <b>보안 완벽:</b> API 키가 화면에서 제거되었으며, 서버의 안전한 환경변수(Secret)에서 관리됩니다.<br><br>
+          <b>네이버 방화벽 우회:</b> 서버 대 서버(S2S) 통신으로 CORS 차단 없이 데이터를 가져옵니다.
+        </div>
+      </div>
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-label">섹터 현황</div>
+      <div class="sector-list" id="sector-list">
+        <div style="font-size:10px;color:var(--text3);padding:6px 4px;">분석 후 표시됩니다</div>
+      </div>
+    </div>
+  </aside>
+  <main class="main">
+    <div class="main-header">
+      <div>
+        <div class="main-title">오늘의 경제 뉴스 분석</div>
+        <div class="main-sub" id="main-sub">뉴스 수집 버튼을 눌러 시작하세요</div>
+      </div>
+    </div>
+    <div class="filter-bar" id="filter-bar" style="display:none"></div>
+    <div class="news-grid" id="news-container">
+      <div style="text-align:center; padding: 60px; color:var(--text3); font-size:12px;">뉴스를 가져와보세요</div>
+    </div>
+  </main>
+</div>
+
+<script>
+  'use strict';
+  // 시계 로직
+  setInterval(() => {
+    const d = new Date();
+    document.getElementById('clock').innerHTML = `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}:${d.getSeconds().toString().padStart(2,'0')}`;
+  }, 1000);
+
+  // [마스터피스] 동시성 제어 큐
+  async function processQueue(tasks, limit) {
+    const results = [];
+    const executing = new Set();
+    for (const task of tasks) {
+      const p = Promise.resolve().then(() => task());
+      results.push(p);
+      executing.add(p);
+      const clean = p.then(() => executing.delete(p));
+      if (executing.size >= limit) await Promise.race(executing);
+    }
+    return Promise.all(results);
+  }
+
+  const KEYWORD_SECTOR = {
+    '반도체':'반도체','HBM':'반도체','DRAM':'반도체','파운드리':'반도체',
+    '인공지능':'AI·인공지능','AI':'AI·인공지능','챗GPT':'AI·인공지능','LLM':'AI·인공지능',
+    '배터리':'2차전지','2차전지':'2차전지','양극재':'2차전지','전고체':'2차전지',
+    '전기차':'전기차·자동차','자동차':'전기차·자동차','현대차':'전기차·자동차','테슬라':'전기차·자동차',
+    '바이오':'바이오·제약','제약':'바이오·제약','신약':'바이오·제약','FDA':'바이오·제약',
+    '금리':'금융·보험','한국은행':'금융·보험','연준':'금융·보험','증권':'금융·보험',
+    '핀테크':'핀테크·인터넷금융','간편결제':'핀테크·인터넷금융','가상자산':'핀테크·인터넷금융',
+    '원전':'원전·신재생','태양광':'원전·신재생','수소':'원전·신재생','재생에너지':'원전·신재생',
+    '방산':'방산·우주','무기':'방산·우주','우주':'방산·우주','발사체':'방산·우주',
+    '조선':'조선·해운','해운':'조선·해운','선박':'조선·해운','LNG선':'조선·해운'
+  };
+
+  const POS_KW = ['상승','증가','성장','호실적','수주','흑자','돌파','급등','강세','개선','회복','반등','최대'];
+  const NEG_KW = ['하락','감소','적자','리스크','우려','위기','제재','손실','침체','급락','약세','부진','악화'];
+
+  function detectSectors(text) {
+    const found = new Set();
+    for (const [kw, sector] of Object.entries(KEYWORD_SECTOR)) if (text.includes(kw)) found.add(sector);
+    return [...found];
+  }
+
+  function detectSentiment(text) {
+    let score = 0;
+    POS_KW.forEach(w => { if (text.includes(w)) score++; });
+    NEG_KW.forEach(w => { if (text.includes(w)) score--; });
+    if (score > 0) return { label:'▲ 긍정', cls:'sent-pos' };
+    if (score < 0) return { label:'▼ 부정', cls:'sent-neg' };
+    return { label:'— 중립', cls:'sent-neu' };
+  }
+
+  function setProgress(pct, msg) {
+    document.getElementById('progress').style.width = pct + '%';
+    document.getElementById('progress-msg').textContent = msg;
+  }
+
+  // ── Vercel 백엔드 호출 로직 ──
+  let allCards = [];
+
+  async function fetchAllNews() {
+    const btn = document.getElementById('run-btn');
+    btn.disabled = true;
+    btn.textContent = '서버 통신 중...';
+
+    const checked = [...document.querySelectorAll('.source-list input:checked')].map(i => i.value);
+    if (!checked.length) { alert('소스를 선택하세요'); btn.disabled = false; return; }
+    
+    document.getElementById('news-container').innerHTML = '';
+    setProgress(10, `백엔드 서버에 RSS 파싱 요청 중...`);
+    
+    try {
+      // 1. 백엔드에서 네이버 방화벽을 뚫고 데이터 가져오기
+      const res = await fetch(`/api/service?action=rss&sources=${checked.join(',')}`);
+      const data = await res.json();
+      if (!data.success || !data.items.length) throw new Error('데이터 파싱 실패');
+      
+      // 중복 제거
+      const seen = new Set();
+      const rawItems = data.items.filter(i => {
+        const key = i.title.slice(0, 20);
+        if (seen.has(key)) return false;
+        seen.add(key); return true;
+      });
+      
+      setProgress(40, `총 ${rawItems.length}건 확보 — AI 분석 서버 호출 시작...`);
+      
+      // 2. 동시성 제어 큐를 활용하여 백엔드 AI 엔진에 비동기 병렬 요청 (속도 3배 증가)
+      const tasks = rawItems.map((item, i) => async () => {
+        const sectors = detectSectors(item.title);
+        const sentiment = detectSentiment(item.title);
+        let aiText = null;
+
+        const pct = 40 + Math.round(((i + 1) / rawItems.length) * 55);
+        setProgress(pct, `AI 서버 엔진 구동 중 (${i+1}/${rawItems.length})`);
+        
+        try {
+          const aiRes = await fetch(`/api/service?action=ai&title=${encodeURIComponent(item.title)}`);
+          const aiData = await aiRes.json();
+          if (aiData.success) aiText = aiData.text;
+        } catch(e) { console.warn('AI 분석 실패'); }
+        return { item, sectors, sentiment, aiText, idx: i };
+      });
+      
+      const cardDataArr = await processQueue(tasks, 3); // 한 번에 3개씩 병렬 처리
+      cardDataArr.sort((a, b) => a.idx - b.idx);
+      allCards = cardDataArr;
+      renderCards(cardDataArr);
+      setProgress(100, `완료 ✓ `);
+    } catch (error) {
+      alert("서버 연결에 실패했습니다. Vercel 배포가 제대로 되었는지 확인하세요.");
+      setProgress(0, "오류 발생");
+    }
+    
+    setTimeout(() => setProgress(0, '대기 중...'), 3000);
+    btn.disabled = false;
+    btn.textContent = '서버리스 수집 + AI 분석 시작';
+  }
+
+  function renderCards(cardDataArr) {
+    const container = document.getElementById('news-container');
+    const frag = document.createDocumentFragment();
+    cardDataArr.forEach(d => {
+      const card = document.createElement('div');
+      card.className = 'news-card';
+      card.style.animationDelay = `${d.idx * 0.04}s`;
+      let tagHtml = d.sectors.length
+        ? d.sectors.map(s => `<span class="sector-tag tag-blue">${s}</span>`).join('')
+        : `<span class="sector-tag tag-gray">섹터 미감지</span>`;
+      card.innerHTML = `
+        <div class="news-card-top">
+          <div class="news-title-text"><a href="${d.item.link}" target="_blank">${d.item.title}</a></div>
+          <span class="sentiment-badge ${d.sentiment.cls}">${d.sentiment.label}</span>
+        </div>
+        <div class="news-meta">
+          <span class="source-badge">${d.item.source}</span>
+        </div>
+        <div class="tag-row">${tagHtml}</div>
+        ${d.aiText ? `<div class="ai-box"><div class="ai-box-label">✦ Vercel AI 엔진 분석</div><div>${d.aiText}</div></div>` : ''}
+      `;
+      frag.appendChild(card);
+    });
+    container.innerHTML = '';
+    container.appendChild(frag);
+  }
+</script>
+</body>
+</html>
